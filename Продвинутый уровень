@@ -1,0 +1,219 @@
+#include <iostream>
+#include <string>
+#include <cstring>
+#include <cstdlib>
+#include <clocale>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+// ============ Вспомогательные функции ============
+
+int parse_domain(const std::string& s) {
+    if (s == "AF_INET"  || s == "inet"  || s == "ipv4" || s == "4") return AF_INET;
+    if (s == "AF_INET6" || s == "inet6" || s == "ipv6" || s == "6") return AF_INET6;
+    return -1;
+}
+
+int parse_type(const std::string& s) {
+    if (s == "SOCK_STREAM" || s == "tcp" || s == "stream") return SOCK_STREAM;
+    if (s == "SOCK_DGRAM"  || s == "udp" || s == "dgram")  return SOCK_DGRAM;
+    return -1;
+}
+
+std::string type_name(int t) {
+    if (t == SOCK_STREAM) return "SOCK_STREAM (TCP)";
+    if (t == SOCK_DGRAM)  return "SOCK_DGRAM (UDP)";
+    return "UNKNOWN (" + std::to_string(t) + ")";
+}
+
+std::string domain_name(int d) {
+    if (d == AF_INET)  return "AF_INET (IPv4)";
+    if (d == AF_INET6) return "AF_INET6 (IPv6)";
+    return "UNKNOWN (" + std::to_string(d) + ")";
+}
+
+void print_usage(const char* prog) {
+    std::cout << "Использование:\n"
+              << "  " << prog << " <domain> <type> <ip> <port> [--bind]\n\n"
+              << "Пример:\n"
+              << "  " << prog << " AF_INET SOCK_STREAM 127.0.0.1 9000 --bind\n\n"
+              << "domain: AF_INET | AF_INET6 | inet | ipv4 | ipv6\n"
+              << "type:   SOCK_STREAM | SOCK_DGRAM | tcp | udp\n"
+              << "port:   0..65535 (0 = случайный свободный порт)\n";
+}
+
+// ============ Основная программа ============
+
+int main(int argc, char* argv[]) {
+    setlocale(LC_ALL, "Russian");
+
+    // --- Проверка количества аргументов ---
+    if (argc < 5) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    // --- Разбор аргументов ---
+    std::string dom_str  = argv[1];
+    std::string type_str = argv[2];
+    std::string ip_str   = argv[3];
+    std::string port_str = argv[4];
+    bool do_bind = (argc >= 6 && std::string(argv[5]) == "--bind");
+
+    // --- Валидация домена ---
+    int domain = parse_domain(dom_str);
+    if (domain < 0) {
+        std::cerr << "Ошибка: неизвестный домен '" << dom_str << "'\n";
+        return 1;
+    }
+
+    // --- Валидация типа сокета ---
+    int type = parse_type(type_str);
+    if (type < 0) {
+        std::cerr << "Ошибка: неизвестный тип сокета '" << type_str << "'\n";
+        return 1;
+    }
+
+    // --- Валидация порта ---
+    int port = 0;
+    try {
+        size_t pos;
+        long tmp = std::stol(port_str, &pos);
+        if (pos != port_str.size()) throw std::invalid_argument("tail");
+        if (tmp < 0 || tmp > 65535) {
+            std::cerr << "Ошибка: порт должен быть 0..65535, получено " << tmp << "\n";
+            return 1;
+        }
+        port = static_cast<int>(tmp);
+    } catch (...) {
+        std::cerr << "Ошибка: '" << port_str << "' не является числом\n";
+        return 1;
+    }
+
+    // --- Инициализация Winsock ---
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed\n";
+        return 1;
+    }
+
+    // --- Создание сокета ---
+    SOCKET sockfd = socket(domain, type, 0);
+    if (sockfd == INVALID_SOCKET) {
+        std::cerr << "socket() error: " << WSAGetLastError() << "\n";
+        WSACleanup();
+        return 1;
+    }
+    std::cout << "[OK] Сокет создан. SOCKET = " << sockfd << "\n";
+
+    // =====================================================
+    // ДОП. ТРЕБОВАНИЕ ВАРИАНТА 13: getsockopt(SO_TYPE)
+    // =====================================================
+    {
+        int optval = 0;
+        int optlen = sizeof(optval);
+        if (getsockopt(sockfd, SOL_SOCKET, SO_TYPE,
+                       reinterpret_cast<char*>(&optval), &optlen) == SOCKET_ERROR) {
+            std::cerr << "getsockopt(SO_TYPE) error: " << WSAGetLastError() << "\n";
+            closesocket(sockfd);
+            WSACleanup();
+            return 1;
+        }
+        std::cout << "[OK] getsockopt(SO_TYPE) = " << type_name(optval)
+                  << " (код " << optval << ")\n";
+
+        if (optval != type) {
+            std::cerr << "[!] Внимание: запрошен " << type_name(type)
+                      << ", а ядро вернуло " << type_name(optval) << "\n";
+        }
+    }
+    // =====================================================
+
+    // --- Заполнение адреса (только IPv4 для простоты) ---
+    if (domain != AF_INET) {
+        std::cerr << "[i] Для AF_INET6 нужна структура sockaddr_in6. "
+                     "В этом примере поддерживается только IPv4.\n";
+        closesocket(sockfd);
+        WSACleanup();
+        return 1;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(static_cast<unsigned short>(port));
+
+    int pton_res = inet_pton(AF_INET, ip_str.c_str(), &addr.sin_addr);
+    if (pton_res == 0) {
+        std::cerr << "inet_pton: неверный формат IP '" << ip_str << "'\n";
+        closesocket(sockfd);
+        WSACleanup();
+        return 1;
+    } else if (pton_res < 0) {
+        std::cerr << "inet_pton system error: " << WSAGetLastError() << "\n";
+        closesocket(sockfd);
+        WSACleanup();
+        return 1;
+    }
+
+    // --- Проверка обратным преобразованием ---
+    char ip_out[INET_ADDRSTRLEN] = {0};
+    if (inet_ntop(AF_INET, &addr.sin_addr, ip_out, sizeof(ip_out)) == NULL) {
+        std::cerr << "inet_ntop error: " << WSAGetLastError() << "\n";
+        closesocket(sockfd);
+        WSACleanup();
+        return 1;
+    }
+    std::cout << "[OK] Адрес: " << ip_out << ":" << ntohs(addr.sin_port) << "\n";
+
+    // --- bind() ---
+    if (do_bind) {
+        if (bind(sockfd, reinterpret_cast<struct sockaddr*>(&addr),
+                 sizeof(addr)) == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            std::cerr << "[FAIL] bind() error " << err;
+            if (err == WSAEADDRINUSE)      std::cerr << " — порт " << port << " занят (EADDRINUSE)";
+            else if (err == WSAEACCES)     std::cerr << " — нет прав на порт < 1024";
+            else if (err == WSAEADDRNOTAVAIL) std::cerr << " — IP не принадлежит машине";
+            std::cerr << "\n";
+            closesocket(sockfd);
+            WSACleanup();
+            return 1;
+        }
+
+        // Если порт был 0 — узнаём, какой ядро выбрало
+        if (port == 0) {
+            struct sockaddr_in actual;
+            int alen = sizeof(actual);
+            if (getsockname(sockfd,
+                            reinterpret_cast<struct sockaddr*>(&actual),
+                            &alen) == 0) {
+                std::cout << "[i] Ядро выбрало порт: " << ntohs(actual.sin_port) << "\n";
+            }
+        }
+        std::cout << "[OK] bind() успешно.\n";
+    } else {
+        std::cout << "[i] bind() не выполнялся (нет флага --bind).\n";
+    }
+
+    // --- Итоговая сводка ---
+    std::cout << "\n--- Итог ---\n"
+              << "Домен:    " << domain_name(domain) << "\n"
+              << "Тип:      " << type_name(type)   << "\n"
+              << "IP:порт:  " << ip_out << ":" << port << "\n"
+              << "SOCKET:   " << sockfd << "\n"
+              << "bind:     " << (do_bind ? "да" : "нет") << "\n";
+
+    // --- Закрытие ---
+    if (closesocket(sockfd) == SOCKET_ERROR) {
+        std::cerr << "closesocket error: " << WSAGetLastError() << "\n";
+        WSACleanup();
+        return 1;
+    }
+    std::cout << "[OK] Сокет закрыт.\n";
+
+    WSACleanup();
+    return 0;
+}
