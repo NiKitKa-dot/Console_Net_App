@@ -1,0 +1,79 @@
+#include <iostream>
+#include <cstring>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+const char* BIND_IP   = "127.0.0.1";
+const int   BIND_PORT = 10000;
+const int   SOCK_TYPE = SOCK_DGRAM;   // UDP по варианту 13
+
+int main() {
+    setlocale(LC_ALL, "Russian");
+
+    // --- Инициализация Winsock ---
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed\n";
+        return 1;
+    }
+
+    // --- Создание сокета ---
+    SOCKET sockfd = socket(AF_INET, SOCK_TYPE, 0);
+    if (sockfd == INVALID_SOCKET) {
+        std::cerr << "socket() error: " << WSAGetLastError() << "\n";
+        WSACleanup();
+        return 1;
+    }
+    std::cout << "[OK] Сокет создан. SOCKET = " << sockfd << "\n";
+
+    // --- Заполнение адреса ---
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(BIND_PORT);
+
+    if (inet_pton(AF_INET, BIND_IP, &addr.sin_addr) != 1) {
+        std::cerr << "inet_pton error: неверный IP\n";
+        closesocket(sockfd);
+        WSACleanup();
+        return 1;
+    }
+
+    // --- bind() ---
+    if (bind(sockfd, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        std::cerr << "[FAIL] bind() error: " << err;
+        if (err == WSAEADDRINUSE)
+            std::cerr << " — порт " << BIND_PORT << " уже занят (EADDRINUSE)";
+        else if (err == WSAEACCES)
+            std::cerr << " — нет прав на порт < 1024";
+        else if (err == WSAEADDRNOTAVAIL)
+            std::cerr << " — IP не принадлежит машине";
+        std::cerr << "\n";
+        closesocket(sockfd);
+        WSACleanup();
+        return 1;
+    }
+    std::cout << "[OK] bind() успешно: " << BIND_IP << ":" << BIND_PORT
+              << " (" << (SOCK_TYPE == SOCK_STREAM ? "TCP" : "UDP") << ")\n";
+
+    // --- Проверка обратным преобразованием ---
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &addr.sin_addr, ip_str, sizeof(ip_str));
+    std::cout << "[i] Проверка адреса: " << ip_str << ":"
+              << ntohs(addr.sin_port) << "\n";
+
+    // --- Закрытие и освобождение ---
+    std::cout << "[i] До closesocket: SOCKET = " << sockfd << "\n";
+    if (closesocket(sockfd) == SOCKET_ERROR) {
+        std::cerr << "closesocket error: " << WSAGetLastError() << "\n";
+        WSACleanup();
+        return 1;
+    }
+    std::cout << "[OK] Сокет закрыт. Дескриптор освобождён.\n";
+
+    WSACleanup();
+    return 0;
+}
